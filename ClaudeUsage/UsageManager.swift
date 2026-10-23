@@ -129,16 +129,23 @@ class UsageManager: ObservableObject {
     }
 
     private func getAccessToken() async throws -> String {
-        // Get token from Claude Code's keychain via security CLI
-        return try getClaudeCodeToken()
+        // Get token from Claude Code's keychain via security CLI, trying the
+        // config dir's own entry before the default one
+        let services = ClaudeConfigManager.keychainServices
+        for service in services.dropLast() {
+            if let token = try? getClaudeCodeToken(service: service) {
+                return token
+            }
+        }
+        return try getClaudeCodeToken(service: services[services.count - 1])
     }
 
     /// Get token from Claude Code's keychain using security CLI (avoids ACL prompt!)
-    private func getClaudeCodeToken() throws -> String {
+    private func getClaudeCodeToken(service: String) throws -> String {
         // Use security CLI which is already in the keychain ACL
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+        process.arguments = ["find-generic-password", "-s", service, "-w"]
 
         let pipe = Pipe()
         let errorPipe = Pipe()

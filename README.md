@@ -78,7 +78,7 @@ Then build with ⌘B and run with ⌘R.
 ### Enabling session alerts (optional)
 
 1. Click the menu bar icon → gear icon → toggle **Alert when a session needs attention**
-2. This installs a small status hook into `~/.claude/settings.json` (pure POSIX sh, no dependencies; your existing settings and hooks are preserved, and toggling off removes it cleanly)
+2. This installs a small status hook into `settings.json` in your Claude Code config dir (pure POSIX sh, no dependencies; your existing settings and hooks are preserved, and toggling off removes it cleanly)
 3. Allow **notifications** when prompted, and allow **"ClaudeUsage wants to control Terminal"** on your first click-to-focus - that's what jumps you to the right terminal tab
 4. Hooks take effect for Claude Code sessions started (or resumed) after enabling
 
@@ -88,9 +88,21 @@ Then build with ⌘B and run with ⌘R.
 
 Claude Usage reads your Claude Code OAuth credentials from macOS Keychain and queries the usage API endpoint at `api.anthropic.com/api/oauth/usage`.
 
-Session alerts work via Claude Code's hooks system: a tiny shell script reports each session's status (working / needs attention / finished) to JSON sidecar files in `~/.claude/claudeusage/`, which the app watches. Everything stays on your machine.
+Session alerts work via Claude Code's hooks system: a tiny shell script reports each session's status (working / needs attention / finished) to JSON sidecar files in `claudeusage/` inside your Claude Code config dir, which the app watches. Everything stays on your machine.
 
 **Note:** This uses an undocumented API that could change at any time. The app will gracefully handle API changes but may stop working if Anthropic modifies the endpoint.
+
+### Custom config dir (`CLAUDE_CONFIG_DIR`)
+
+Claude Code keeps its config in `~/.claude` unless `CLAUDE_CONFIG_DIR` points elsewhere. When it does, Claude Code also stores its login under its own Keychain entry, `Claude Code-credentials-<8 hex digits>`, rather than `Claude Code-credentials`. Claude Usage follows both: it uses `CLAUDE_CONFIG_DIR` for settings, CLAUDE.md and session alerts, and reads that config dir's Keychain entry first, falling back to the default one.
+
+Apps started from Finder or at login don't see variables set in your shell profile, so Claude Usage also checks the launchd user environment. If you set `CLAUDE_CONFIG_DIR` in your shell, set it there too:
+
+```bash
+launchctl setenv CLAUDE_CONFIG_DIR "$HOME/.config/claude"
+```
+
+Then quit and reopen Claude Usage. The footer of its settings window shows the config dir it is using.
 
 ## Privacy
 
