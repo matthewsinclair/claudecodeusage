@@ -429,7 +429,7 @@ class SessionMonitor: ObservableObject {
             }
 
             let out = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
-            try out.write(to: Self.settingsURL, options: .atomic)
+            try out.write(to: Self.settingsURL.resolvingSymlinksInPath(), options: .atomic)
         }
 
         try? FileManager.default.removeItem(at: Self.baseDir)
@@ -441,7 +441,9 @@ class SessionMonitor: ObservableObject {
     # ClaudeUsage session status hook (installed by ClaudeUsage.app)
     # Reads the Claude Code hook event from stdin and writes a status sidecar
     # file that the ClaudeUsage menu bar app watches.
-    DIR="$HOME/.claude/claudeusage/sessions"
+    # Sessions live beside this script, inside whichever config dir it was
+    # installed into (~/.claude or $CLAUDE_CONFIG_DIR).
+    DIR="$(dirname "$0")/sessions"
     mkdir -p "$DIR" 2>/dev/null
     INPUT=$(cat)
 
