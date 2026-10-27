@@ -49,6 +49,11 @@ struct UsageView: View {
                 Divider()
             }
 
+            // Profile tabs (only when several Claude Code logins exist)
+            if manager.profiles.count > 1 {
+                profilePicker()
+            }
+
             if let error = manager.error {
                 errorView(error)
             } else if let usage = manager.usage {
@@ -70,6 +75,23 @@ struct UsageView: View {
         .frame(width: 280)
     }
     
+    @ViewBuilder
+    func profilePicker() -> some View {
+        Picker("", selection: Binding(
+            get: { manager.selectedProfileService ?? "" },
+            set: { manager.selectProfile($0) }
+        )) {
+            ForEach(manager.profiles) { profile in
+                Text(profile.shortLabel).tag(profile.service)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+        .help(manager.profiles.map(\.label).joined(separator: " · "))
+        .padding(.horizontal)
+        .padding(.top, 10)
+    }
+
     @ViewBuilder
     func usageContent(_ usage: UsageData) -> some View {
         VStack(spacing: 16) {
