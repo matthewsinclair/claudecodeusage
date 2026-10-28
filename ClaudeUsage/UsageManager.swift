@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import CryptoKit
 
 struct ModelLimit {
     let name: String
@@ -38,8 +39,61 @@ struct ClaudeProfile: Identifiable {
     var label: String          // account email once known, else a fallback
     var usage: UsageData?
     var error: String?
+    var identity: ClaudeAccountIdentity?
     var id: String { service }
+}
 
+/// Account identity includes the organization: the same user in two
+/// organizations can have different subscription limits.
+struct ClaudeAccountIdentity: Hashable {
+    let accountID: String
+    let organizationID: String
+}
+
+struct ClaudeAccountDetails {
+    let email: String?
+    let identity: ClaudeAccountIdentity?
+
+    static func parse(_ data: Data) -> ClaudeAccountDetails? {
+        guard let json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let account = json["account"] as? [String: Any] else { return nil }
+        let organization = json["organization"] as? [String: Any]
+        let identity: ClaudeAccountIdentity?
+        if let accountID = account["uuid"] as? String, !accountID.isEmpty,
+           let organizationID = organization?["uuid"] as? String, !organizationID.isEmpty {
+            identity = ClaudeAccountIdentity(accountID: accountID, organizationID: organizationID)
+        } else {
+            identity = nil
+        }
+        return ClaudeAccountDetails(email: account["email"] as? String, identity: identity)
+    }
+}
+
+enum ClaudeProfileList {
+    /// Keep discovery order, but prefer a working login and then the user's
+    /// selected service when several stores belong to the same account.
+    static func unique(_ profiles: [ClaudeProfile], selectedService: String?) -> [ClaudeProfile] {
+        var result: [ClaudeProfile] = []
+        var indexes: [ClaudeAccountIdentity: Int] = [:]
+        for profile in profiles {
+            guard let identity = profile.identity else {
+                result.append(profile)
+                continue
+            }
+            if let index = indexes[identity] {
+                let previous = result[index]
+                let workingReplacement = previous.usage == nil && profile.usage != nil
+                let sameAvailability = (previous.usage != nil) == (profile.usage != nil)
+                if workingReplacement || (sameAvailability && profile.service == selectedService) {
+                    result[index] = profile
+                }
+            } else {
+                indexes[identity] = result.count
+                result.append(profile)
+            }
+        }
+        return result
+    }
 }
 
 /// A Claude credential store can contain MCP logins without a Claude account.
@@ -68,14 +122,15 @@ class UsageManager: ObservableObject {
     @Published var updateAvailable: String?
     @Published var updateDownloadURL: URL?
 
-    /// All Claude Code logins found in the Keychain, active config dir's first.
+    /// Distinct accounts found in the Keychain, active config dir's first.
     /// With a single profile the app behaves exactly as before.
     @Published var profiles: [ClaudeProfile] = []
     @Published private(set) var selectedProfileService: String? =
         UserDefaults.standard.string(forKey: "selectedProfileService")
 
-    /// Email labels already resolved this run, keyed by Keychain service
-    private var profileLabels: [String: String] = [:]
+    /// Invalidate identity and email when a store is logged into another account.
+    /// Cache only a fingerprint, never the access token itself.
+    private var profileAccounts: [String: (fingerprint: String, details: ClaudeAccountDetails)] = [:]
 
     static let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0.0"
     static let githubRepo = "richhickson/claudecodeusage"
@@ -108,14 +163,11 @@ class UsageManager: ObservableObject {
         return URLSession(configuration: config)
     }()
 
-    /// Highest utilization across session, weekly, and model-scoped limits —
-    /// over every profile, so a hot limit on another account still shows
+    /// Menu-bar colour and percentage both describe the selected account.
     var maxUtilization: Double {
-        let usages = profiles.isEmpty ? [usage].compactMap { $0 } : profiles.compactMap(\.usage)
-        return usages.map { u in
-            let maxModelUtil = u.modelLimits.map(\.utilization).max() ?? 0
-            return max(u.sessionUtilization, u.weeklyUtilization, maxModelUtil)
-        }.max() ?? 0
+        guard let usage else { return 0 }
+        let model = usage.modelLimits.map(\.utilization).max() ?? 0
+        return max(usage.sessionUtilization, usage.weeklyUtilization, model)
     }
 
     var statusEmoji: String {
@@ -135,18 +187,17 @@ class UsageManager: ObservableObject {
         var newProfiles: [ClaudeProfile] = []
         for service in services {
             var profile = ClaudeProfile(service: service,
-                                        label: profileLabels[service] ?? Self.fallbackLabel(service))
+                                        label: Self.fallbackLabel(service))
             do {
                 guard let token = try await getClaudeCodeTokenWithRetry(service: service) else {
                     // MCP-only stores remain untouched in Keychain.
                     continue
                 }
-                profile.usage = try await fetchUsageWithRetry(token: token)
-                if profileLabels[service] == nil,
-                   let email = await fetchProfileEmail(token: token) {
-                    profileLabels[service] = email
-                    profile.label = email
+                if let details = await accountDetails(service: service, token: token) {
+                    profile.label = details.email ?? profile.label
+                    profile.identity = details.identity
                 }
+                profile.usage = try await fetchUsageWithRetry(token: token)
             } catch let keychainError as KeychainError {
                 profile.error = keychainError.localizedDescription
             } catch {
@@ -155,9 +206,16 @@ class UsageManager: ObservableObject {
             newProfiles.append(profile)
         }
 
+        let selectedIdentity = newProfiles.first { $0.service == selectedProfileService }?.identity
+        newProfiles = ClaudeProfileList.unique(newProfiles, selectedService: selectedProfileService)
         profiles = newProfiles
         if selectedProfileService == nil || !newProfiles.contains(where: { $0.service == selectedProfileService }) {
-            selectedProfileService = newProfiles.first?.service
+            // If the selected credential failed, keep the same account via its
+            // other working store instead of jumping to an unrelated account.
+            selectedProfileService = newProfiles.first {
+                selectedIdentity != nil && $0.identity == selectedIdentity
+            }?.service ?? newProfiles.first?.service
+            UserDefaults.standard.set(selectedProfileService, forKey: "selectedProfileService")
         }
         applySelection()
         lastUpdated = Date()
@@ -246,20 +304,23 @@ class UsageManager: ObservableObject {
         return "Profile \(suffix.prefix(8))"
     }
 
-    /// Account email for a profile tab label, from /api/oauth/profile
-    private func fetchProfileEmail(token: String) async -> String? {
+    private func accountDetails(service: String, token: String) async -> ClaudeAccountDetails? {
+        let fingerprint = SHA256.hash(data: Data(token.utf8)).map { String(format: "%02x", $0) }.joined()
+        if let cached = profileAccounts[service], cached.fingerprint == fingerprint {
+            return cached.details
+        }
+        profileAccounts.removeValue(forKey: service)
         var request = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/profile")!)
         request.httpMethod = "GET"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("claude-code/\(Self.claudeCodeVersion)", forHTTPHeaderField: "User-Agent")
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-
         guard let (data, response) = try? await urlSession.data(for: request),
               (response as? HTTPURLResponse)?.statusCode == 200,
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let account = json["account"] as? [String: Any] else { return nil }
-        return account["email"] as? String
+              let details = ClaudeAccountDetails.parse(data) else { return nil }
+        profileAccounts[service] = (fingerprint, details)
+        return details
     }
 
     /// Read only this service: a failed named login must never use another
