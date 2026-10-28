@@ -108,14 +108,11 @@ class UsageManager: ObservableObject {
         return URLSession(configuration: config)
     }()
 
-    /// Highest utilization across session, weekly, and model-scoped limits —
-    /// over every profile, so a hot limit on another account still shows
+    /// Menu-bar colour and percentage both describe the selected account.
     var maxUtilization: Double {
-        let usages = profiles.isEmpty ? [usage].compactMap { $0 } : profiles.compactMap(\.usage)
-        return usages.map { u in
-            let maxModelUtil = u.modelLimits.map(\.utilization).max() ?? 0
-            return max(u.sessionUtilization, u.weeklyUtilization, maxModelUtil)
-        }.max() ?? 0
+        guard let usage else { return 0 }
+        let model = usage.modelLimits.map(\.utilization).max() ?? 0
+        return max(usage.sessionUtilization, usage.weeklyUtilization, model)
     }
 
     var statusEmoji: String {
